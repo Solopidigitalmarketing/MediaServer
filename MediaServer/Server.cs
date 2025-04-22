@@ -3,175 +3,219 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Threading.Tasks;
+using System.Threading;
 
-public class Server
+namespace MediaServer
 {
-    private readonly int port;
-
-    public Server(int port)
+    public class Server
     {
-        this.port = port;
-    }
+        private TcpListener server;
+        private string[] fileArray;
+        private string path;
+        private bool isRunning;
 
-    public void Start()
-    {
-        TcpListener listener = new TcpListener(IPAddress.Any, port);
-        listener.Start();
-        Console.WriteLine($"Server started on port {port}");
-
-        while (true)
+        // Constructor with mediaPath validation
+        public Server(string address, int port, string mediaPath)
         {
-            var client = listener.AcceptTcpClient();
+            server = new TcpListener(IPAddress.Parse(address), port);
+            path = mediaPath ?? throw new ArgumentNullException(nameof(mediaPath));
 
-            Console.WriteLine($"[{DateTime.Now}] Connection from {client.Client.RemoteEndPoint}");
-
-            Task.Run(() => HandleClient(client));
+            // Use verbatim string or escape the backslashes
+            fileArray = Directory.GetFiles(@"C:\Users\solop\Documents\MP3");
+            isRunning = false;
         }
-    }
 
-    private void HandleClient(TcpClient client)
-    {
-        try
+        // Start the server
+        public void Start()
         {
-            using (var stream = client.GetStream())
-            using (var reader = new StreamReader(stream))
-            using (var writer = new StreamWriter(stream) { AutoFlush = true })
+            server.Start();
+            isRunning = true;
+            Console.WriteLine("Server started...");
+
+            while (isRunning)
             {
-                string requestLine = reader.ReadLine();
+                if (!server.Pending())
+                {
+                    Thread.Sleep(100); // prevent tight loop
+                    continue;
+                }
+
+                TcpClient client = server.AcceptTcpClient();
+                Thread clientThread = new Thread(() => HandleClient(client));
+                clientThread.Start();
+            }
+        }
+
+        // Stop the server
+        public void Stop()
+        {
+            isRunning = false;
+            server.Stop();
+        }
+
+        // Handle incoming client requests
+        private void HandleClient(TcpClient client)
+        {
+            using NetworkStream stream = client.GetStream();
+            StreamReader reader = new StreamReader(stream);
+            StreamWriter writer = new StreamWriter(stream) { AutoFlush = true };
+
+            try
+            {
+                string? requestLine = reader.ReadLine();
                 if (string.IsNullOrWhiteSpace(requestLine)) return;
 
-                Console.WriteLine($"Request: {requestLine}");
+                Console.WriteLine("Request: " + requestLine);
 
                 string[] tokens = requestLine.Split(' ');
-                if (tokens.Length != 3) return;
-
                 string method = tokens[0];
-                string url = Uri.UnescapeDataString(tokens[1]);
-                string protocol = tokens[2];
+                string requestPath = Uri.UnescapeDataString(tokens[1].TrimStart('/'));
+                string filePath = Path.Combine(path, requestPath);
 
-                if (method != "GET" && method != "HEAD")
+                if (method == "HEAD")
                 {
-                    writer.WriteLine("HTTP/1.1 405 Method Not Allowed");
-                    writer.WriteLine("Allow: GET, HEAD");
-                    writer.WriteLine();
-                    return;
+                    HandleHead(writer, filePath);
                 }
-
-                string filePath = "wwwroot" + url.Replace('/', Path.DirectorySeparatorChar);
-
-                if (Directory.Exists(filePath))
-                    filePath = Path.Combine(filePath, "index.html");
-
-                if (!File.Exists(filePath))
+                else if (method == "GET")
                 {
-                    Console.WriteLine($"File not found: {filePath}");
-                    writer.WriteLine("HTTP/1.1 404 Not Found");
-                    writer.WriteLine("Content-Type: text/plain");
-                    writer.WriteLine();
-                    writer.WriteLine("404 Not Found");
-                    return;
-                }
-
-                FileInfo file = new FileInfo(filePath);
-                string mimeType = GetMimeType(filePath);
-
-                long start = 0;
-                long end = file.Length - 1;
-                bool isPartial = false;
-
-                string line;
-                while (!string.IsNullOrEmpty(line = reader.ReadLine()))
-                {
-                    if (line.StartsWith("Range:"))
+                    if (Directory.Exists(filePath))
                     {
-                        Console.WriteLine($"Range requested: {line}");
-                        var range = line.Substring("Range: bytes=".Length).Split('-');
-                        start = long.Parse(range[0]);
-                        if (!string.IsNullOrEmpty(range[1]))
-                            end = long.Parse(range[1]);
-
-                        isPartial = true;
+                        string indexPath = Path.Combine(filePath, "index.html");
+                        if (File.Exists(indexPath))
+                        {
+                            ServeFile(writer, stream, indexPath, method, requestLine);
+                        }
+                        else
+                        {
+                            writer.WriteLine("HTTP/1.1 404 Not Found\r\n\r\n");
+                        }
                     }
-                }
-
-                if (start >= file.Length || start > end)
-                {
-                    writer.WriteLine("HTTP/1.1 416 Range Not Satisfiable");
-                    writer.WriteLine($"Content-Range: bytes */{file.Length}");
-                    writer.WriteLine();
-                    return;
-                }
-
-                if (isPartial)
-                {
-                    writer.WriteLine("HTTP/1.1 206 Partial Content");
-                    writer.WriteLine($"Content-Range: bytes {start}-{end}/{file.Length}");
-                    writer.WriteLine($"Content-Length: {end - start + 1}");
+                    else
+                    {
+                        ServeFile(writer, stream, filePath, method, requestLine);
+                    }
                 }
                 else
                 {
-                    writer.WriteLine("HTTP/1.1 200 OK");
-                    writer.WriteLine($"Content-Length: {file.Length}");
-                }
-
-                writer.WriteLine($"Content-Type: {mimeType}");
-                writer.WriteLine("Accept-Ranges: bytes");
-                writer.WriteLine();
-                writer.Flush();
-
-                if (method == "GET")
-                {
-                    using (FileStream fs = new FileStream(filePath, FileMode.Open, FileAccess.Read))
-                    {
-                        fs.Seek(start, SeekOrigin.Begin);
-                        byte[] buffer = new byte[8192];
-                        long remaining = end - start + 1;
-                        int bytesRead;
-
-                        while (remaining > 0 && (bytesRead = fs.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining))) > 0)
-                        {
-                            stream.Write(buffer, 0, bytesRead);
-                            remaining -= bytesRead;
-                        }
-                        stream.Flush();
-                    }
+                    writer.WriteLine("HTTP/1.1 405 Method Not Allowed\r\n\r\n");
                 }
             }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Error handling client: " + ex.Message);
+            }
+            finally
+            {
+                client.Close();
+            }
         }
-        catch (IOException ioEx)
-        {
-            Console.WriteLine($"IO Exception: {ioEx.Message}");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine($"Error handling client: {ex.Message}");
-        }
-        finally
-        {
-            client.Close();
-            Console.WriteLine("Client disconnected.");
-        }
-    }
 
-    private string GetMimeType(string filePath)
-    {
-        string ext = Path.GetExtension(filePath).ToLowerInvariant();
-
-        switch (ext)
+        // Handle HEAD request (file metadata)
+        private void HandleHead(StreamWriter writer, string filePath)
         {
-            case ".html": return "text/html";
-            case ".htm": return "text/html";
-            case ".css": return "text/css";
-            case ".js": return "application/javascript";
-            case ".png": return "image/png";
-            case ".jpg":
-            case ".jpeg": return "image/jpeg";
-            case ".gif": return "image/gif";
-            case ".mp4": return "video/mp4";
-            case ".mp3": return "audio/mpeg";
-            case ".txt": return "text/plain";
-            default: return "application/octet-stream";
+            if (File.Exists(filePath))
+            {
+                FileInfo fi = new FileInfo(filePath);
+                string mime = GetMimeType(fi.Extension);
+
+                writer.WriteLine("HTTP/1.1 200 OK");
+                writer.WriteLine("Content-Type: " + mime);
+                writer.WriteLine("Content-Length: " + fi.Length);
+                writer.WriteLine("Connection: close\r\n");
+            }
+            else
+            {
+                writer.WriteLine("HTTP/1.1 404 Not Found\r\n\r\n");
+            }
         }
+
+        // Serve file for GET requests
+        private void ServeFile(StreamWriter writer, NetworkStream stream, string filePath, string method, string requestLine)
+        {
+            if (!File.Exists(filePath))
+            {
+                writer.WriteLine("HTTP/1.1 404 Not Found\r\n\r\n");
+                return;
+            }
+
+            FileInfo fi = new FileInfo(filePath);
+            string mime = GetMimeType(fi.Extension);
+            long totalLength = fi.Length;
+
+            bool isPartial = false;
+            long start = 0;
+            long end = totalLength - 1;
+
+            string rangeHeader = null;
+            while (true)
+            {
+                string line = new StreamReader(stream).ReadLine();
+                if (string.IsNullOrWhiteSpace(line)) break;
+
+                if (line.StartsWith("Range:"))
+                {
+                    rangeHeader = line;
+                    break;
+                }
+            }
+
+            if (!string.IsNullOrEmpty(rangeHeader))
+            {
+                isPartial = true;
+                string[] parts = rangeHeader.Split('=');
+                string[] range = parts[1].Split('-');
+
+                if (!string.IsNullOrEmpty(range[0])) start = long.Parse(range[0]);
+                if (!string.IsNullOrEmpty(range[1])) end = long.Parse(range[1]);
+            }
+
+            long contentLength = end - start + 1;
+
+            if (isPartial)
+            {
+                writer.WriteLine("HTTP/1.1 206 Partial Content");
+                writer.WriteLine($"Content-Range: bytes {start}-{end}/{totalLength}");
+            }
+            else
+            {
+                writer.WriteLine("HTTP/1.1 200 OK");
+            }
+
+            writer.WriteLine("Content-Type: " + mime);
+            writer.WriteLine("Content-Length: " + contentLength);
+            writer.WriteLine("Accept-Ranges: bytes");
+            writer.WriteLine("Connection: close\r\n");
+
+            using FileStream fs = File.OpenRead(filePath);
+            fs.Seek(start, SeekOrigin.Begin);
+
+            byte[] buffer = new byte[8192];
+            int bytesRead;
+            long remaining = contentLength;
+
+            while (remaining > 0 && (bytesRead = fs.Read(buffer, 0, (int)Math.Min(buffer.Length, remaining))) > 0)
+            {
+                stream.Write(buffer, 0, bytesRead);
+                remaining -= bytesRead;
+            }
+        }
+
+        // Get MIME type for a file extension
+        private string GetMimeType(string extension) => extension.ToLower() switch
+        {
+            ".html" => "text/html",
+            ".htm" => "text/html",
+            ".txt" => "text/plain",
+            ".jpg" => "image/jpeg",
+            ".jpeg" => "image/jpeg",
+            ".png" => "image/png",
+            ".gif" => "image/gif",
+            ".css" => "text/css",
+            ".js" => "application/javascript",
+            ".json" => "application/json",
+            ".mp3" => "audio/mpeg",
+            ".mp4" => "video/mp4",
+            _ => "application/octet-stream",
+        };
     }
 }
