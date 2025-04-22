@@ -1,5 +1,6 @@
 ﻿using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 
 namespace MediaServer
 {
@@ -11,13 +12,23 @@ namespace MediaServer
         public AvailableMedia(string path)
         {
             path = path.ToLower();
+
             if (AvailableMedia.path == null || !AvailableMedia.path.Equals(path))
             {
                 AvailableMedia.path = path;
-                fileArray = Directory.GetFiles(path, "*.mp3", SearchOption.AllDirectories).Union(Directory.GetFiles(path, "*.mp4", SearchOption.AllDirectories)).ToArray();
-                //TODO: ADD jpg, png, and gif to the fileArray 
+
+                var extensions = new[] { "*.mp3", "*.mp4", "*.jpg", "*.png", "*.gif" };
+                var files = new List<string>();
+
+                foreach (var ext in extensions)
+                {
+                    files.AddRange(Directory.GetFiles(path, ext, SearchOption.AllDirectories));
+                }
+
+                fileArray = files.ToArray();
             }
         }
+
         public IEnumerable<string> getAvailableFiles()
         {
             return fileArray;
