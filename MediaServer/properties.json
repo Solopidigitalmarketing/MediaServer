@@ -1,5 +1,5 @@
 ﻿{
     "ip": "127.0.0.1",
-    "port": 9090,
-    "mediaDir": "C:\\media"
+    "port": 8080,
+    "mediaDir": "C:\\Users\\solop\\Documents\\MP3"
 }

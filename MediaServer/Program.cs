@@ -1,7 +1,7 @@
 ﻿using System;
 using System.IO;
-using System.Threading;
 using System.Text.Json.Nodes;
+using System.Threading;
 
 namespace MediaServer
 {
@@ -11,32 +11,60 @@ namespace MediaServer
         {
             Console.WriteLine("eL33T Media Server");
 
-            // Load properties from JSON file
             string fileName = "properties.json";
-            string rawProperties = File.ReadAllText(fileName);
+            string rawProperties;
 
-            // Parse the JSON into a JsonNode
-            JsonNode properties = JsonNode.Parse(rawProperties)!;
+            try
+            {
+                // Check if the properties file exists
+                if (!File.Exists(fileName))
+                {
+                    Console.WriteLine("Error: The properties.json file is missing.");
+                    return;
+                }
 
-            // Retrieve values from the properties JSON
-            string ip = properties["ip"].GetValue<string>();
-            int port = properties["port"].GetValue<int>();
-            string mediaDir = properties["mediaDir"].GetValue<string>();
+                rawProperties = File.ReadAllText(fileName);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error reading properties file: {ex.Message}");
+                return;
+            }
 
-            // Initialize and start the server on a separate thread
+            JsonNode properties;
+
+            try
+            {
+                properties = JsonNode.Parse(rawProperties)!;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error parsing properties file: {ex.Message}");
+                return;
+            }
+
+            // Extract values or fallback to defaults
+            string ip = properties["ip"]?.GetValue<string>() ?? "127.0.0.1";
+            int port = properties["port"]?.GetValue<int>() ?? 8080;
+            string mediaDir = properties["mediaDir"]?.GetValue<string>() ?? "./media";
+
+            // Initialize the Server with provided config
             Server server = new Server(ip, port, mediaDir);
-            Thread serverThread = new Thread(server.Start);
 
-            Console.WriteLine($"Access via link: http://{ip}:{port}");
+            // Start the server in a new thread
+            Thread thread = new Thread(() =>
+            {
+                server.Start();
+            });
+            thread.Start();
 
-            // Start the server thread
-            serverThread.Start();
-
+            Console.WriteLine("Server is running... Access via link: http://{0}:{1}", ip, port);
             Console.WriteLine("Press Enter to stop the server...");
-            Console.ReadLine();
 
-            // Stop the server gracefully when Enter is pressed
-            server.Stop();
+            Console.ReadLine(); // Wait for user input to stop the server
+            server.Stop();      // Stop the server gracefully
+            thread.Join();      // Wait for the server thread to finish
+            Console.WriteLine("Server stopped.");
         }
     }
 }
